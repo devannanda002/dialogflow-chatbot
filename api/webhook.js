@@ -9,6 +9,8 @@ const OUTLET_MILES_PER_NIGHT = 35; // demo: standard 120V outlet overnight (~10 
 const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 const str = (v) => (Array.isArray(v) ? v.join(", ") : v == null ? "" : String(v)).trim();
 const has = (s, ...words) => words.some((w) => s.toLowerCase().includes(w));
+const fmt = (m) => (m < 60 ? `${m} minutes` : `${Math.floor(m / 60)} hr${m % 60 ? ` ${m % 60} min` : ""}`);
+const list = (a) => (a.length <= 1 ? a.join("") : `${a.slice(0, -1).join(", ")} and ${a[a.length - 1]}`);
 
 function greeting() {
   const hour = Number(
@@ -45,17 +47,20 @@ function plan(p) {
   const stops = superMiles === 0 ? 0 : Math.max(1, Math.ceil(superMiles / MILES_PER_STOP));
   const chargeMin = stops * MINUTES_PER_STOP;
 
-  // Detour time from distance (first number found, assume ~2 min per mile each way).
-  const d = parseFloat((distanceText.match(/[\d.]+/) || [])[0]);
+  // Detour time: typical one-way miles for each distance band, ~2 min per mile.
+  let d = NaN, distPhrase = "";
+  if (has(distanceText, "under", "less")) { d = 3; distPhrase = "a nearby station (under 5 miles)"; }
+  else if (has(distanceText, "15+", "more than 15", "over 15")) { d = 18; distPhrase = "a station 15+ miles away"; }
+  else if (has(distanceText, "5", "15")) { d = 10; distPhrase = "a station 5–15 miles away"; }
   const detourMin = isNaN(d) ? 0 : Math.round(d * 2 * 2 * stops);
   const totalMin = chargeMin + detourMin;
 
   // When to charge.
   let when;
-  if (has(freeTime, "morning")) when = "early mornings, before stations get busy";
-  else if (has(freeTime, "lunch", "midday", "afternoon")) when = "a midday or lunch break";
-  else if (has(freeTime, "evening", "night")) when = "evenings (check the app — later hours are often off-peak and cheaper)";
-  else if (has(freeTime, "weekend")) when = "the weekend";
+  if (has(freeTime, "weekend")) when = "weekend mornings, before stations get busy";
+  else if (has(freeTime, "late", "night")) when = "late nights, when stations are quiet and often off-peak (cheaper)";
+  else if (has(freeTime, "morning")) when = "weekday mornings, before your day starts";
+  else if (has(freeTime, "evening")) when = "weekday evenings (check the app — later hours are often off-peak and cheaper)";
   else when = freeTime || "whenever you have a free half hour";
 
   const days = ["Monday", "Wednesday", "Friday", "Sunday", "Tuesday", "Thursday", "Saturday"];
@@ -69,12 +74,25 @@ function plan(p) {
     parts.push(`At about ${miles} miles a week, your outlet could cover most of your driving, so you might rarely need a Supercharger.`);
   } else {
     parts.push(
-      `At about ${miles} miles a week${hasOutlet ? ` (with roughly ${outletMiles} covered by your outlet)` : ""}, plan on ${stops} Supercharger stop${stops > 1 ? "s" : ""} — around ${chargeMin} minutes of charging${detourMin ? ` plus ~${detourMin} minutes of driving to a station ${distanceText} away` : ""}, so about ${totalMin} minutes a week.`
+      `At about ${miles} miles a week${hasOutlet ? ` (with roughly ${outletMiles} covered by your outlet)` : ""}, plan on ${stops} Supercharger stop${stops > 1 ? "s" : ""} — around ${fmt(chargeMin)} of charging${detourMin ? ` plus ~${fmt(detourMin)} of round-trip driving to ${distPhrase}` : ""}, so about ${fmt(totalMin)} a week.`
     );
-    parts.push(`Suggested days: ${schedule.join(", ")}, during ${when}.`);
+    const wk = schedule.filter((x) => x === "Saturday" || x === "Sunday");
+    const extra = schedule.filter((x) => x !== "Saturday" && x !== "Sunday");
+    if (has(freeTime, "weekend") && extra.length) {
+      parts.push(`Suggested schedule: ${list(wk)} during ${when}, plus a quick weekday top-up on ${list(extra)}.`);
+    } else {
+      parts.push(`Suggested day${schedule.length > 1 ? "s" : ""}: ${list(schedule)}, during ${when}.`);
+    }
+    if (d >= 15) parts.push("That drive adds up — look for a Supercharger along a route you already take, like your commute.");
   }
 
-  if (anchor && stops > 0) parts.push(`Pair each stop with ${anchor} so the charging time doesn't feel wasted.`);
+  const a = anchor.toLowerCase();
+  if (a && !has(a, "none") && stops > 0) {
+    const spot = has(a, "work") ? "a Supercharger near work, during your workday" : has(a, "coffee", "mall") ? `a ${a} trip` : `your ${a} visit`;
+    parts.push(`Pair each stop with ${spot} so the charging time doesn't feel wasted.`);
+  } else if (stops > 0) {
+    parts.push("Bring a podcast or catch up on email — 25 minutes goes fast.");
+  }
   if (stops >= 3 && !hasOutlet) parts.push("Tip: even occasional access to a regular outlet would cut a stop or two.");
   if (trips && has(trips, "often", "frequent", "monthly", "weekly", "every")) {
     parts.push("Since you take road trips often, use the Tesla trip planner — it routes Supercharger stops for you.");
