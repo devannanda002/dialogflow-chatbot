@@ -1,0 +1,7 @@
+{
+  "name": "tesla-supercharger-webhook",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Dialogflow ES webhook for the Tesla Supercharger Lifestyle Planner demo",
+  "engines": { "node": ">=18" }
+}
