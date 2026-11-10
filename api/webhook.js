@@ -208,21 +208,96 @@ function plan(p) {
   return msgs;
 }
 
+// ---------- Fallbacks & re-prompts ----------
+// Example answers for each planner question, shown when the bot doesn't understand.
+const SLOT_HINTS = {
+  weekly_miles: 'Just a rough number works, like "150" or "about 200 miles." Not sure? A 20-mile round-trip commute, 5 days a week, is about 100 miles.',
+  station_distance: 'You can say "under 5 miles," "5–15 miles," "15+ miles," or "not sure."',
+  anchor_place: 'You can say "grocery store," "gym," "work," "coffee shop or mall," or "none of these."',
+  free_time: 'You can say "weekday mornings," "weekday evenings," "weekend mornings," or "late nights."',
+  outlet_access: 'Just "yes" or "no" is fine.',
+  road_trip_frequency: 'You can say "rarely," "a few times a year," or "monthly."',
+  vehicle_style: 'You can say "sedan" (Model 3) or "SUV" (Model Y).',
+};
+const SLOT_ORDER = ["weekly_miles", "station_distance", "anchor_place", "free_time", "outlet_access", "road_trip_frequency", "vehicle_style"];
+
+const ctxName = (c) => (c.name || "").split("/contexts/")[1] || "";
+const getCtx = (qr, name) => (qr.outputContexts || []).find((c) => ctxName(c).toLowerCase() === name);
+
+// While Planner_Questions is still collecting answers (slot filling).
+function slotPrompt(qr, session) {
+  const prompt = qr.fulfillmentText || "";
+  const missing = SLOT_ORDER.find((k) => qr.parameters && (qr.parameters[k] === "" || qr.parameters[k] == null));
+  const last = getCtx(qr, "slot_retry");
+  const lastPrompt = last && last.parameters && last.parameters.prompt;
+  const retry = lastPrompt && lastPrompt === prompt;
+  const msgs = retry
+    ? [`${pick(["Sorry, I didn't quite catch that.", "Hmm, I didn't get that one.", "Sorry, I'm not sure what you meant."])} ${prompt}`, SLOT_HINTS[missing] || ""].filter(Boolean)
+    : [prompt];
+  const ctx = { name: `${session}/contexts/slot_retry`, lifespanCount: 2, parameters: { prompt } };
+  return { msgs, contexts: [ctx] };
+}
+
+// Catch-all for anything no intent understands.
+function fallback(qr, session) {
+  const fc = getCtx(qr, "fallback_count");
+  const n = ((fc && fc.parameters && Number(fc.parameters.n)) || 0) + 1;
+  const keep = [];
+  const milesStep = getCtx(qr, "weekly_miles_step");
+  const gate = getCtx(qr, "home_charging_gate");
+  if (milesStep) keep.push({ name: milesStep.name, lifespanCount: 5 });
+  if (gate) keep.push({ name: gate.name, lifespanCount: 5 });
+
+  let msgs;
+  if (n >= 3) {
+    msgs = [
+      "It seems like I'm not understanding, sorry about that.",
+      'You can say "start over" to begin again, or for questions outside this planner, contact a Tesla advisor at tesla.com/support.',
+    ];
+    return { msgs, contexts: [...keep, { name: `${session}/contexts/fallback_count`, lifespanCount: 0 }] };
+  }
+  const sorry = pick(["Sorry, I didn't catch that.", "Hmm, I'm not sure I understood.", "Sorry, I didn't quite get that."]);
+  if (milesStep) {
+    msgs = [`${sorry} Roughly how many miles do you drive in a typical week?`, SLOT_HINTS.weekly_miles];
+  } else if (gate) {
+    msgs = [`${sorry} Do you have a charger where you usually park?`, 'You can say "yes," "no," or "not sure."'];
+  } else {
+    msgs = [
+      `${sorry} I'm the Supercharger Lifestyle Planner. I build a weekly charging plan for people who can't charge at home.`,
+      'Say "start over" to begin.',
+    ];
+  }
+  return { msgs, contexts: [...keep, { name: `${session}/contexts/fallback_count`, lifespanCount: 3, parameters: { n } }] };
+}
+
 module.exports = (req, res) => {
   if (req.method !== "POST") return res.status(200).send("Dialogflow webhook is running.");
   const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : req.body || {};
   const qr = body.queryResult || {};
+  const session = body.session || "";
   const intent = (qr.intent && qr.intent.displayName) || "";
   const params = qr.parameters || {};
 
-  let msgs;
-  if (intent === "Default Welcome Intent") msgs = welcome();
+  let msgs, extraCtx = [];
+  if (qr.intent && qr.intent.isFallback) ({ msgs, contexts: extraCtx } = fallback(qr, session));
+  else if (intent === "Default Welcome Intent") msgs = welcome();
   else if (intent === "Home_Charging_Yes") msgs = homePath();
-  else if (intent === "Planner_Questions") msgs = plan(params);
+  else if (intent === "Planner_Questions" && qr.allRequiredParamsPresent === false) ({ msgs, contexts: extraCtx } = slotPrompt(qr, session));
+  else if (intent === "Planner_Questions") {
+    msgs = plan(params);
+    // Conversation is done: close the question steps so later fallbacks don't ask for miles again.
+    extraCtx = ["weekly_miles_step", "home_charging_gate", "slot_retry", "fallback_count"].map((n) => ({ name: `${session}/contexts/${n}`, lifespanCount: 0 }));
+  }
   else msgs = [qr.fulfillmentText || "Sorry, could you say that another way?"]; // keep the console response
 
-  res.status(200).json({
+  const out = {
     fulfillmentText: msgs.join("\n\n"),
     fulfillmentMessages: msgs.map((t) => ({ text: { text: [t] } })),
-  });
+  };
+  if (extraCtx.length) {
+    // Keep Dialogflow's own contexts (slot filling, steps) and add/override ours.
+    const mine = new Set(extraCtx.map((c) => ctxName(c)));
+    out.outputContexts = [...(qr.outputContexts || []).filter((c) => !mine.has(ctxName(c))), ...extraCtx];
+  }
+  res.status(200).json(out);
 };
